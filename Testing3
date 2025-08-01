@@ -1,0 +1,124 @@
+You'll need to perform a two-way synchronization between the new schema and the existing semantics file.
+To achieve this, the process_collection function must be updated to not only add new fields but also prune stale ones that no longer exist in the schema, while logging these changes.
+## src/mongo_schema_profiler/generator.py (Updated)
+This refactored process_collection function implements the full two-way sync logic.
+# src/mongo_schema_profiler/generator.py
+
+import copy
+import json
+import os
+from collections import defaultdict
+from typing import Any, Dict, List, Optional, Tuple
+
+import yaml
+from bson.objectid import ObjectId
+from deepmerge import always_merger
+from pymongo.database import Database
+from pymongo.collection import Collection
+
+# ... (Constants and helper functions like _map_to_json_type, etc., remain the same) ...
+
+def process_collection(db: Database, config: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Orchestrates the schema generation process, performing a two-way sync
+    between the new schema and the existing semantics file.
+    """
+    collection_name = config["name"]
+    collection = db[collection_name]
+
+    # Generate the structural schema and a summary of the process.
+    structural_schema, summary = generate_structural_schema(
+        collection=collection,
+        sample_size=config.get("sample_size", 1000),
+        discriminator_field=config.get("discriminator_field"),
+        field_rules=config.get("field_rules", {})
+    )
+
+    # Define paths and ensure the directory exists.
+    collection_dir = os.path.join("collections", collection_name)
+    os.makedirs(collection_dir, exist_ok=True)
+    schema_path = os.path.join(collection_dir, "schema.json")
+    semantics_path = os.path.join(collection_dir, "semantics.yml")
+
+    # Save the new structural schema.
+    with open(schema_path, "w") as f:
+        json.dump(structural_schema, f, indent=2)
+
+    # --- UPDATED TWO-WAY SYNC LOGIC ---
+    change_log = {"added": [], "removed": []}
+    
+    # Generate a fresh skeleton based on the new schema to get the ideal state.
+    new_skeleton = generate_yaml_skeleton(structural_schema)
+    new_fields_set = set(new_skeleton.get("fields", {}).keys())
+
+    if os.path.exists(semantics_path):
+        with open(semantics_path, 'r') as f:
+            current_semantics = yaml.safe_load(f) or {"fields": {}}
+        summary["semantics_file_status"] = "Updated"
+        
+        current_fields = current_semantics.setdefault("fields", {})
+        current_fields_set = set(current_fields.keys())
+
+        # 1. Find and remove stale fields from semantics
+        stale_fields = current_fields_set - new_fields_set
+        for field in stale_fields:
+            del current_fields[field]
+            change_log["removed"].append(field)
+            
+        # 2. Find and add new fields to semantics
+        newly_added_fields = new_fields_set - current_fields_set
+        for field in newly_added_fields:
+            new_wiring = new_skeleton["fields"][field]
+            new_wiring["description"] = "TODO: [NEWLY ADDED] Describe the purpose of this field."
+            current_fields[field] = new_wiring
+            change_log["added"].append(field)
+            
+        final_semantics = current_semantics
+    else:
+        # If the file is new, just use the skeleton. No changes to log.
+        final_semantics = new_skeleton
+        summary["semantics_file_status"] = "Created"
+
+    # Save the synchronized semantics file.
+    with open(semantics_path, "w") as f:
+        yaml.dump(final_semantics, f, sort_keys=False, indent=2)
+
+    summary["schema_path"] = schema_path
+    summary["semantics_path"] = semantics_path
+    summary["change_log"] = change_log # Add the log to the summary
+    return summary
+
+## api.py (Updated)
+The API models are updated to include the change_log in the response, making the changes visible to the user who triggered the process.
+# api.py
+
+import yaml
+import logging
+from fastapi import FastAPI, HTTPException
+from pymongo import MongoClient
+from typing import List, Dict, Any
+from pydantic import BaseModel, Field
+
+from src.mongo_schema_profiler.generator import process_collection
+
+# --- Pydantic Models for API Responses ---
+
+class ChangeLog(BaseModel):
+    added: List[str] = Field(..., description="List of fields added to the semantics file.")
+    removed: List[str] = Field(..., description="List of fields removed from the semantics file.")
+
+class ProcessSummary(BaseModel):
+    validator_found: bool
+    documents_sampled: int
+    semantics_file_status: str = Field(..., description="Status of the semantics file ('Created' or 'Updated').")
+    schema_path: str
+    semantics_path: str
+    change_log: ChangeLog = Field(..., description="A log of changes made to the semantics file.")
+
+class ProcessResult(BaseModel):
+    status: str
+    summary: ProcessSummary | None = None
+    detail: str | None = None
+
+# ... (The rest of the API file remains the same) ...
+
