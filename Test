@@ -1,0 +1,57 @@
+You're right to point that out. The semantic skeleton was empty because the generate_yaml_skeleton function in a previous code example I provided was an incomplete placeholder that returned an empty dictionary. My apologies for that error.
+Here is the complete and correct implementation for that section.
+## Corrected Code
+Replace the placeholder generate_yaml_skeleton function in your src/mongo_schema_profiler/generator.py file with the following two functions. This will correctly generate the "wiring" you're looking for.
+# src/mongo_schema_profiler/generator.py
+
+# --- YAML Skeleton Generation ---
+
+def generate_yaml_skeleton(schema: Dict) -> Dict:
+    """Generates the initial YAML skeleton for data stewards to fill out."""
+    is_schemaless = schema.get("additionalProperties", False)
+    desc_note = " Note if this collection is schemaless or has many optional fields."
+    
+    skeleton = {
+        "description": f"TODO: High-level business purpose of this collection.{desc_note if is_schemaless else ''}",
+        "use_cases": ["TODO: What business questions does this collection answer?"],
+        "example_queries": [{"nlq": "TODO: A natural language question.", "mql": "TODO: The corresponding MQL query."}],
+        "fields": {}
+    }
+    
+    # Check for properties at the root or within a 'oneOf' for polymorphic schemas
+    if "properties" in schema:
+        skeleton["fields"] = _generate_yaml_skeleton_recursive(schema["properties"])
+    elif "oneOf" in schema:
+        all_properties = {}
+        for sub_schema in schema["oneOf"]:
+            all_properties.update(sub_schema.get("properties", {}))
+        skeleton["fields"] = _generate_yaml_skeleton_recursive(all_properties)
+        
+    return skeleton
+
+def _generate_yaml_skeleton_recursive(properties: Dict[str, Any]) -> Dict[str, Any]:
+    """Helper to recursively build the YAML skeleton for nested fields."""
+    skeleton = {}
+    for name, prop in properties.items():
+        # Basic entry for every field
+        field_entry = {
+            "description": "TODO: Describe the purpose of this field.",
+            "synonyms": [],
+            "business_rules": [],
+        }
+        
+        # Add a placeholder for enum mapping if the schema defines an enum
+        if "enum" in prop:
+            enum_map = {str(val): f"Meaning of {val}" for val in prop["enum"]}
+            field_entry["enum_mapping"] = enum_map
+
+        # Recurse into nested objects
+        if prop.get("bsonType") == "object" and "properties" in prop:
+            field_entry["fields"] = _generate_yaml_skeleton_recursive(prop["properties"])
+        # Recurse into arrays of objects
+        elif prop.get("items", {}).get("bsonType") == "object" and "properties" in prop.get("items", {}):
+            field_entry["fields"] = _generate_yaml_skeleton_recursive(prop["items"]["properties"])
+
+        skeleton[name] = field_entry
+    return skeleton
+
